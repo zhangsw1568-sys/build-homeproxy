@@ -1,0 +1,82 @@
+name: build-homeproxy-for-openwrt-25.12
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential flex bison g++ gawk gettext git \
+            libncurses-dev libssl-dev python3 python3-setuptools \
+            rsync unzip zlib1g-dev file wget ca-certificates tar zstd swig
+
+      - name: Download OpenWrt SDK
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/work"
+          cd "$GITHUB_WORKSPACE/work"
+          wget -O sdk.tar.zst \
+            https://downloads.openwrt.org/releases/25.12-SNAPSHOT/targets/mediatek/filogic/openwrt-sdk-25.12-SNAPSHOT-mediatek-filogic_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+          tar --zstd -xf sdk.tar.zst
+          echo "SDK_DIR=$(find "$GITHUB_WORKSPACE/work" -maxdepth 1 -type d -name 'openwrt-sdk-*Linux-x86_64' | head -n 1)" >> $GITHUB_ENV
+
+      - name: Cache dl
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.SDK_DIR }}/dl
+          key: openwrt-dl-${{ runner.os }}-filogic-25.12-homeproxy
+          restore-keys: |
+            openwrt-dl-${{ runner.os }}-filogic-25.12-
+
+      - name: Prepare feeds
+        run: |
+          cd "$SDK_DIR"
+          grep -q '^src-git luci ' feeds.conf.default || echo 'src-git luci https://git.openwrt.org/project/luci.git' >> feeds.conf.default
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Clone HomeProxy source
+        run: |
+          cd "$SDK_DIR"
+          rm -rf package/luci-app-homeproxy
+          git clone https://github.com/immortalwrt/homeproxy.git package/luci-app-homeproxy
+          sed -i 's@include ../../luci.mk@include $(TOPDIR)/feeds/luci/luci.mk@' package/luci-app-homeproxy/Makefile
+
+      - name: Cache build dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.SDK_DIR }}/staging_dir
+            ${{ env.SDK_DIR }}/build_dir
+          key: openwrt-build-${{ runner.os }}-filogic-25.12-homeproxy-${{ github.run_id }}
+          restore-keys: |
+            openwrt-build-${{ runner.os }}-filogic-25.12-homeproxy-
+            openwrt-build-${{ runner.os }}-filogic-25.12-
+
+      - name: Build HomeProxy + zh-cn
+        run: |
+          cd "$SDK_DIR"
+          make defconfig
+          make package/luci-app-homeproxy/compile V=s -j2 || make package/luci-app-homeproxy/compile V=s -j1
+          make package/luci-i18n-homeproxy-zh-cn/compile V=s -j2 || make package/luci-i18n-homeproxy-zh-cn/compile V=s -j1
+
+      - name: Collect packages
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          find "$SDK_DIR" -type f \( -name '*homeproxy*.apk' -o -name '*homeproxy*.ipk' \) -exec cp -v {} "$GITHUB_WORKSPACE/out/" \;
+          ls -lh "$GITHUB_WORKSPACE/out"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: homeproxy-build
+          path: out/
