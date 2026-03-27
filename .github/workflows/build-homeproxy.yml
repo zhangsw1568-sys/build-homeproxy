@@ -1,7 +1,16 @@
-name: build-homeproxy-for-openwrt-25.12
+name: build-homeproxy-and-singbox
 
 on:
   workflow_dispatch:
+    inputs:
+      homeproxy_ref:
+        description: "HomeProxy branch/tag/commit"
+        required: true
+        default: "dev"
+      singbox_channel:
+        description: "stable 或 prerelease"
+        required: true
+        default: "stable"
 
 jobs:
   build:
@@ -28,6 +37,15 @@ jobs:
           tar --zstd -xf sdk.tar.zst
           echo "SDK_DIR=$(find "$GITHUB_WORKSPACE/work" -maxdepth 1 -type d -name 'openwrt-sdk-*Linux-x86_64' | head -n 1)" >> $GITHUB_ENV
 
+      - name: Cache dl
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.SDK_DIR }}/dl
+          key: openwrt-dl-${{ runner.os }}-filogic-25.12-homeproxy
+          restore-keys: |
+            openwrt-dl-${{ runner.os }}-filogic-25.12-
+
       - name: Prepare feeds
         run: |
           cd "$SDK_DIR"
@@ -39,23 +57,89 @@ jobs:
         run: |
           cd "$SDK_DIR"
           rm -rf package/luci-app-homeproxy
-          git clone https://github.com/immortalwrt/homeproxy.git package/luci-app-homeproxy
+          git clone --branch "${{ github.event.inputs.homeproxy_ref }}" --depth 1 https://github.com/immortalwrt/homeproxy.git package/luci-app-homeproxy
           sed -i 's@include ../../luci.mk@include $(TOPDIR)/feeds/luci/luci.mk@' package/luci-app-homeproxy/Makefile
 
-      - name: Build HomeProxy
+      - name: Cache build dirs
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.SDK_DIR }}/staging_dir
+            ${{ env.SDK_DIR }}/build_dir
+          key: openwrt-build-${{ runner.os }}-filogic-25.12-homeproxy-${{ github.run_id }}
+          restore-keys: |
+            openwrt-build-${{ runner.os }}-filogic-25.12-homeproxy-
+            openwrt-build-${{ runner.os }}-filogic-25.12-
+
+      - name: Build HomeProxy + zh-cn
         run: |
           cd "$SDK_DIR"
           make defconfig
           make package/luci-app-homeproxy/compile V=s -j2 || make package/luci-app-homeproxy/compile V=s -j1
+          make package/luci-i18n-homeproxy-zh-cn/compile V=s -j2 || make package/luci-i18n-homeproxy-zh-cn/compile V=s -j1
 
-      - name: Collect packages
+      - name: Download latest sing-box arm64 binary
         run: |
           mkdir -p "$GITHUB_WORKSPACE/out"
+          python3 - <<'PY'
+          import json, os, sys, urllib.request
+
+          channel = os.environ.get("SINGBOX_CHANNEL", "stable").strip().lower()
+          req = urllib.request.Request(
+              "https://api.github.com/repos/SagerNet/sing-box/releases",
+              headers={"Accept": "application/vnd.github+json", "User-Agent": "github-actions"}
+          )
+          data = json.load(urllib.request.urlopen(req))
+
+          rel = None
+          if channel == "prerelease":
+              for r in data:
+                  if r.get("prerelease"):
+                      rel = r
+                      break
+          else:
+              for r in data:
+                  if not r.get("prerelease") and not r.get("draft"):
+                      rel = r
+                      break
+
+          if not rel:
+              print("No matching sing-box release found", file=sys.stderr)
+              sys.exit(1)
+
+          wanted = None
+          for a in rel.get("assets", []):
+              name = a.get("name", "")
+              if name.endswith("linux-arm64.tar.gz") and "android" not in name:
+                  wanted = a
+                  break
+
+          if not wanted:
+              print("No linux-arm64 tar.gz asset found in release", file=sys.stderr)
+              sys.exit(1)
+
+          print(rel["tag_name"], file=open(os.path.join(os.environ["GITHUB_WORKSPACE"], "out", "sing-box-version.txt"), "w"))
+          print(wanted["browser_download_url"], file=open(os.path.join(os.environ["GITHUB_WORKSPACE"], "out", "sing-box-url.txt"), "w"))
+          PY
+        env:
+          SINGBOX_CHANNEL: ${{ github.event.inputs.singbox_channel }}
+
+      - name: Fetch and extract sing-box
+        run: |
+          cd "$GITHUB_WORKSPACE/out"
+          wget -O sing-box.tar.gz "$(cat sing-box-url.txt)"
+          tar -xzf sing-box.tar.gz
+          find . -type f -name 'sing-box' -exec mv {} ./sing-box-arm64 \;
+          chmod +x ./sing-box-arm64
+          ls -lh .
+
+      - name: Collect HomeProxy packages
+        run: |
           find "$SDK_DIR" -type f \( -name '*homeproxy*.apk' -o -name '*homeproxy*.ipk' \) -exec cp -v {} "$GITHUB_WORKSPACE/out/" \;
           ls -lh "$GITHUB_WORKSPACE/out"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: homeproxy-build
+          name: homeproxy-and-singbox
           path: out/
