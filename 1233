@@ -1,0 +1,4 @@
+把这两个 .apk 都上传到路由器 /tmp，然后安装：
+apk add --allow-untrusted /tmp/luci-app-homeproxy-26.071.13677~ec92da1.apk /tmp/luci-i18n-homeproxy-zh-cn-25.313.55402~fe77709.apk
+装完后刷新 LuCI：
+rm -f /tmp/luci-indexcache /tmp/luci-indexcache.* && rm -rf /tmp/luci-modulecache/ && /etc/init.d/rpcd restart && (/etc/init.d/uhttpd restart 2>/dev/null || /etc/init.d/nginx restart 2>/dev/null)
